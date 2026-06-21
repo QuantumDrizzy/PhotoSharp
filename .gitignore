@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Raw captures and outputs stay local (large, private)
+*.mp4
+*.mov
+*.avi
+*.ser
+*.fits
+/captures
+photosharp-out.png
+photosharp-demo-*.png
+
+# OS / editor
+.DS_Store
+Thumbs.db

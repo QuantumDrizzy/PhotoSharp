@@ -1,0 +1,5 @@
+# Normalize line endings to LF in the repository (cross-platform community tool).
+* text=auto eol=lf
+
+# Binary assets.
+*.png binary
