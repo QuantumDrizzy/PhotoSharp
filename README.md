@@ -12,6 +12,21 @@ It is the open-source, native, *maintained* alternative to the classic but aband
 PIPP → AutoStakkert! → RegiStax toolchain: one tool, no antivirus headaches, yours to
 extend.
 
+## A real Moon, from a phone through the eyepiece
+
+A hand-held 4K phone clip down a telescope on a manual mount, so the Moon drifts the whole
+time. PhotoSharp decoded it, auto-tracked and cropped the disk frame by frame, graded all of
+them and stacked the sharpest 55 of 180 — crisper maria, crater detail along the terminator,
+Tycho's ray system, less noise:
+
+| One raw frame | PhotoSharp — 55 frames stacked |
+|:---:|:---:|
+| ![one raw frame](docs/showcase/moon-real-single.png) | ![stacked](docs/showcase/moon-real-stack.png) |
+
+The honest limit, in one line: a sharp result needs detail in the capture. Point it at a
+focused, well-exposed target and it pulls that detail out; point it at an over-exposed blur
+and you get a cleaner blur. The software is ready — the rest is the capture.
+
 ## The result
 
 The bundled `demo` (no telescope required) simulates 200 jittered, blurred, noisy frames

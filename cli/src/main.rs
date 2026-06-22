@@ -32,6 +32,10 @@ enum Cmd {
         /// Cap on the number of frames decoded from --video (bounds memory).
         #[arg(long, default_value_t = 1500)]
         max_frames: usize,
+        /// Detection threshold = mean + k·std. Lower k (~0.5) for a big bright Moon,
+        /// higher (~3) for a small planet on black.
+        #[arg(long, default_value_t = 3.0)]
+        centroid_k: f32,
         /// Fraction of the sharpest frames to keep (0..1).
         #[arg(long, default_value_t = 0.3)]
         keep: f32,
@@ -89,11 +93,11 @@ fn load_dir(dir: &PathBuf) -> Result<Vec<Gray>> {
 
 /// Decode a video and crop the planet ROI from each frame (streaming — full frames never
 /// all live in memory at once).
-fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize) -> Result<Vec<Gray>> {
+fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize, centroid_k: f32) -> Result<Vec<Gray>> {
     let p = path.to_str().context("video path is not valid UTF-8")?;
     let mut frames: Vec<Gray> = Vec::new();
     let n = decode::decode_gray(p, max_frames, |_i, frame| {
-        let (cx, cy) = roi::bright_centroid(&frame, 3.0);
+        let (cx, cy) = roi::bright_centroid(&frame, centroid_k);
         frames.push(roi::crop_centered(&frame, cx, cy, roi_size));
     })?;
     if frames.is_empty() {
@@ -108,9 +112,9 @@ fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize) -> Result<Vec<
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Stack { video, input, roi, max_frames, keep, sigma, amount, out, stretch } => {
+        Cmd::Stack { video, input, roi, max_frames, centroid_k, keep, sigma, amount, out, stretch } => {
             let frames = match (video, input) {
-                (Some(v), _) => load_video(&v, roi, max_frames)?,
+                (Some(v), _) => load_video(&v, roi, max_frames, centroid_k)?,
                 (None, Some(d)) => {
                     let f = load_dir(&d)?;
                     println!("[photosharp] loaded {} frames from {}", f.len(), d.display());
