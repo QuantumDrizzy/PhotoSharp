@@ -41,13 +41,15 @@ ratio by ~√N; a final unsharp mask restores the detail the atmosphere softened
 
 ## Status
 
-**Phase 1 — the core pipeline — works and is tested.** It runs on a sequence of frames and
-ships with a synthetic `demo` that verifies the whole chain end to end with no real data.
+**Phases 1–2 work and are verified.** The lucky-imaging core (grade/align/stack/sharpen) plus
+video input: point it at an MP4/MOV and it streams frames through `ffmpeg`, auto-crops the
+planet, and stacks — verified end to end on a real (h264) video. A synthetic `demo` runs with
+no data at all.
 
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | grade · align · stack · sharpen · CLI · synthetic demo | ✅ done |
-| 2 | MP4/MOV/SER decode (real 4K captures end to end) | planned |
+| 2 | video decode via `ffmpeg` + per-frame planet auto-crop (`--video`) | ✅ done |
 | 3 | native `egui` GUI (load, tune, preview, export) | planned |
 | 4 | CUDA path · 16-bit TIFF · drizzle · sub-pixel · batch | planned |
 
@@ -64,7 +66,13 @@ This generates a synthetic planet, simulates 200 jittered/blurred/noisy frames, 
 `demo-single.png` (one raw frame) next to `demo-stacked.png` (the recovered result) so you
 can see what stacking buys you.
 
-On real frames (a folder of PNG/JPEG/TIFF exported from a capture):
+On your own capture — point it straight at the video (decoded via `ffmpeg`, planet auto-cropped):
+
+```bash
+cargo run --release -p photosharp-cli -- stack --video saturn.mp4 --roi 512 --keep 0.3 --stretch --out saturn.png
+```
+
+Or on a folder of already-exported frames (PNG/JPEG/TIFF):
 
 ```bash
 cargo run --release -p photosharp-cli -- stack --input ./frames --keep 0.3 --stretch --out saturn.png
@@ -77,7 +85,9 @@ cargo build --release
 cargo test
 ```
 
-Pure Rust, no system dependencies (video decode in Phase 2 will add `ffmpeg`).
+Pure Rust core. Video input (`--video`) shells out to `ffmpeg`/`ffprobe` — the standard native
+video layer; install it (e.g. `winget install ffmpeg`) for that path. The synthetic `demo` and
+the `--input` folder mode need nothing but Rust.
 
 ## Licence
 

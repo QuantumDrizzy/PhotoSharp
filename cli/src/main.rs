@@ -1,8 +1,8 @@
 //! PhotoSharp CLI — stack a burst of planetary/lunar frames into one sharp image.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use photosharp_core::{image_io, pipeline, synthetic};
+use photosharp_core::{decode, image_io, pipeline, roi, synthetic, Gray};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -18,11 +18,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Stack a folder of frames (PNG/JPEG/TIFF) into one sharp image.
+    /// Stack into one sharp image. Source is a video (--video) or a folder of frames (--input).
     Stack {
-        /// Directory containing the input frames.
+        /// A video file (mp4/mov/…), decoded via ffmpeg; the planet is auto-cropped per frame.
         #[arg(long)]
-        input: PathBuf,
+        video: Option<PathBuf>,
+        /// A directory of frames (PNG/JPEG/TIFF), instead of a video.
+        #[arg(long)]
+        input: Option<PathBuf>,
+        /// Crop window (pixels) around the planet, used with --video.
+        #[arg(long, default_value_t = 512)]
+        roi: usize,
+        /// Cap on the number of frames decoded from --video (bounds memory).
+        #[arg(long, default_value_t = 1500)]
+        max_frames: usize,
         /// Fraction of the sharpest frames to keep (0..1).
         #[arg(long, default_value_t = 0.3)]
         keep: f32,
@@ -41,24 +50,28 @@ enum Cmd {
     },
     /// Run on synthetic frames (no real data) to verify the pipeline end to end.
     Demo {
-        /// Number of synthetic frames to generate.
         #[arg(long, default_value_t = 200)]
         frames: usize,
-        /// Output filename prefix.
         #[arg(long, default_value = "photosharp-demo")]
         out_prefix: String,
     },
+    /// Write synthetic capture frames as numbered PNGs (to test the folder/video path).
+    GenFrames {
+        #[arg(long, default_value_t = 200)]
+        frames: usize,
+        #[arg(long, default_value_t = 256)]
+        size: usize,
+        #[arg(long, default_value = "frames")]
+        out_dir: PathBuf,
+    },
 }
 
-fn load_dir(dir: &PathBuf) -> Result<Vec<photosharp_core::Gray>> {
+fn load_dir(dir: &PathBuf) -> Result<Vec<Gray>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             matches!(
-                p.extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_lowercase())
-                    .as_deref(),
+                p.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()).as_deref(),
                 Some("png" | "jpg" | "jpeg" | "tif" | "tiff")
             )
         })
@@ -74,11 +87,37 @@ fn load_dir(dir: &PathBuf) -> Result<Vec<photosharp_core::Gray>> {
     Ok(frames)
 }
 
+/// Decode a video and crop the planet ROI from each frame (streaming — full frames never
+/// all live in memory at once).
+fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize) -> Result<Vec<Gray>> {
+    let p = path.to_str().context("video path is not valid UTF-8")?;
+    let mut frames: Vec<Gray> = Vec::new();
+    let n = decode::decode_gray(p, max_frames, |_i, frame| {
+        let (cx, cy) = roi::bright_centroid(&frame, 3.0);
+        frames.push(roi::crop_centered(&frame, cx, cy, roi_size));
+    })?;
+    if frames.is_empty() {
+        bail!("decoded 0 frames from {}", path.display());
+    }
+    println!(
+        "[photosharp] decoded {n} frames from {}, cropped {}x{} around the planet",
+        path.display(), frames[0].w, frames[0].h
+    );
+    Ok(frames)
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Stack { input, keep, sigma, amount, out, stretch } => {
-            let frames = load_dir(&input)?;
-            println!("[photosharp] loaded {} frames from {}", frames.len(), input.display());
+        Cmd::Stack { video, input, roi, max_frames, keep, sigma, amount, out, stretch } => {
+            let frames = match (video, input) {
+                (Some(v), _) => load_video(&v, roi, max_frames)?,
+                (None, Some(d)) => {
+                    let f = load_dir(&d)?;
+                    println!("[photosharp] loaded {} frames from {}", f.len(), d.display());
+                    f
+                }
+                (None, None) => bail!("give --video <file> or --input <folder>"),
+            };
             let params = pipeline::Params {
                 keep_fraction: keep,
                 unsharp_sigma: sigma,
@@ -96,7 +135,7 @@ fn main() -> Result<()> {
         Cmd::Demo { frames, out_prefix } => {
             let truth = synthetic::planet(256);
             let caps = synthetic::capture(&truth, frames, 42);
-            let raw: Vec<photosharp_core::Gray> = caps.into_iter().map(|c| c.img).collect();
+            let raw: Vec<Gray> = caps.into_iter().map(|c| c.img).collect();
             let (img, rep) = pipeline::process(&raw, &pipeline::Params::default());
 
             image_io::save_gray(&raw[rep.ref_index].stretched(), format!("{out_prefix}-single.png"))?;
@@ -110,6 +149,15 @@ fn main() -> Result<()> {
             println!(
                 "[photosharp] wrote {out_prefix}-single.png, {out_prefix}-stacked.png, {out_prefix}-truth.png"
             );
+        }
+        Cmd::GenFrames { frames, size, out_dir } => {
+            std::fs::create_dir_all(&out_dir)?;
+            let truth = synthetic::planet(size);
+            let caps = synthetic::capture(&truth, frames, 42);
+            for (i, c) in caps.iter().enumerate() {
+                image_io::save_gray(&c.img, out_dir.join(format!("frame_{i:05}.png")))?;
+            }
+            println!("[photosharp] wrote {frames} frames to {}", out_dir.display());
         }
     }
     Ok(())

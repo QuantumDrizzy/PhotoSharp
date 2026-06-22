@@ -7,10 +7,12 @@
 //! imaging" technique — with the luck replaced by a deterministic sharpness metric.
 
 pub mod align;
+pub mod decode;
 pub mod gray;
 pub mod image_io;
 pub mod pipeline;
 pub mod quality;
+pub mod roi;
 pub mod sharpen;
 pub mod stack;
 pub mod synthetic;
