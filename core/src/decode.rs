@@ -44,7 +44,9 @@ pub fn decode_gray<F: FnMut(usize, Gray)>(path: &str, max_frames: usize, mut on_
     let (w, h) = (info.w, info.h);
 
     let mut child = Command::new("ffmpeg")
-        .args(["-v", "error", "-i", path, "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        // -noautorotate: keep the coded WxH that ffprobe reported; otherwise a phone's
+        // rotation metadata makes ffmpeg emit transposed frames that mismatch (w, h).
+        .args(["-v", "error", "-noautorotate", "-i", path, "-f", "rawvideo", "-pix_fmt", "gray", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
