@@ -37,6 +37,40 @@ pub fn probe(path: &str) -> Result<VideoInfo> {
     Ok(VideoInfo { w: nums[0], h: nums[1] })
 }
 
+/// A human-readable summary of a video, for the UI.
+pub struct Summary {
+    pub w: usize,
+    pub h: usize,
+    pub frames: usize,
+    pub duration: f64,
+}
+
+/// Probe dimensions, frame count and duration (best-effort; `frames` may be 0 if the
+/// container does not store an exact count).
+pub fn summary(path: &str) -> Result<Summary> {
+    let VideoInfo { w, h } = probe(path)?;
+    let field = |args: &[&str]| -> String {
+        Command::new("ffprobe")
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let frames = field(&[
+        "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_frames", "-of", "csv=p=0", path,
+    ])
+    .parse()
+    .unwrap_or(0);
+    let duration = field(&[
+        "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path,
+    ])
+    .parse()
+    .unwrap_or(0.0);
+    Ok(Summary { w, h, frames, duration })
+}
+
 /// Stream gray frames from `path`, calling `on_frame(index, frame)` for up to `max_frames`.
 /// Returns the number of frames decoded.
 pub fn decode_gray<F: FnMut(usize, Gray)>(path: &str, max_frames: usize, mut on_frame: F) -> Result<usize> {
