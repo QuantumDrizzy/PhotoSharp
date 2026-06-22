@@ -139,6 +139,13 @@ fn human_duration(s: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// A labelled slider: caption above, full-width control below, with a hover hint.
+fn slider_row(ui: &mut egui::Ui, label: &str, slider: egui::Slider<'_>, hint: &str) {
+    ui.add_space(7.0);
+    ui.label(egui::RichText::new(label).small().weak());
+    ui.add(slider).on_hover_text(hint);
+}
+
 impl App {
     fn open_video(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
@@ -242,71 +249,83 @@ impl eframe::App for App {
 
         egui::SidePanel::left("controls")
             .resizable(false)
-            .exact_width(300.0)
+            .exact_width(340.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(egui::Color32::from_gray(247))
+                    .inner_margin(egui::Margin::same(14)),
+            )
             .show(ctx, |ui| {
-                ui.add_space(10.0);
-
-                // 1. Source
-                ui.label(egui::RichText::new("1 · Source").strong().color(ACCENT));
-                if ui.button("Open video…").clicked() {
-                    self.open_video();
-                }
-                match (&self.video, &self.info) {
-                    (Some(p), Some(info)) => {
-                        ui.label(p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-                        let frames = if info.frames > 0 { info.frames.to_string() } else { "?".into() };
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}×{}  ·  {} frames  ·  {}",
-                                info.w, info.h, frames, human_duration(info.duration)
-                            ))
-                            .weak()
-                            .small(),
-                        );
+                // 1 · Source
+                ui.group(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(egui::RichText::new("1 · Source").strong().color(ACCENT));
+                    ui.add_space(6.0);
+                    if ui.add_sized([ui.available_width(), 30.0], egui::Button::new("Open video…")).clicked() {
+                        self.open_video();
                     }
-                    _ => {
-                        ui.label(egui::RichText::new("no video selected").weak());
+                    ui.add_space(4.0);
+                    match (&self.video, &self.info) {
+                        (Some(p), Some(info)) => {
+                            ui.label(p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+                            let frames = if info.frames > 0 { info.frames.to_string() } else { "?".into() };
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}×{}  ·  {} frames  ·  {}",
+                                    info.w, info.h, frames, human_duration(info.duration)
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        }
+                        _ => {
+                            ui.label(egui::RichText::new("no video selected").weak());
+                        }
                     }
-                }
+                });
 
-                ui.add_space(10.0);
-                ui.separator();
+                ui.add_space(12.0);
 
-                // 2. Target
-                ui.label(egui::RichText::new("2 · Target").strong().color(ACCENT));
-                ui.add(egui::Slider::new(&mut self.roi, 128..=2400).text("crop px"))
-                    .on_hover_text("Size of the square crop centred on the target.\nA small planet needs ~512; the whole Moon needs ~1900.");
-                ui.add(egui::Slider::new(&mut self.centroid_k, 0.0..=4.0).text("detect"))
-                    .on_hover_text("How bright the target must be to be found (mean + k·σ).\nLow (~0.5) for a big bright Moon, high (~3) for a small planet on black.");
-                ui.add(egui::Slider::new(&mut self.max_frames, 50..=4000).text("max frames"))
-                    .on_hover_text("Cap on how many frames to read (bounds memory).");
+                // 2 · Target
+                ui.group(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(egui::RichText::new("2 · Target").strong().color(ACCENT));
+                    slider_row(ui, "crop (px)", egui::Slider::new(&mut self.roi, 128..=2400),
+                        "Square crop centred on the target.\n~512 for a small planet, ~1900 for the whole Moon.");
+                    slider_row(ui, "detect", egui::Slider::new(&mut self.centroid_k, 0.0..=4.0),
+                        "Brightness threshold (mean + k·σ).\nLow (~0.5) for a big bright Moon, high (~3) for a small planet.");
+                    slider_row(ui, "max frames", egui::Slider::new(&mut self.max_frames, 50..=4000),
+                        "Cap on how many frames to read (bounds memory).");
+                });
 
-                ui.add_space(10.0);
-                ui.separator();
+                ui.add_space(12.0);
 
-                // 3. Stack & sharpen
-                ui.label(egui::RichText::new("3 · Stack & sharpen").strong().color(ACCENT));
-                ui.add(egui::Slider::new(&mut self.keep, 0.05..=1.0).text("keep"))
-                    .on_hover_text("Fraction of the sharpest frames to stack.\nLower keeps only the very best moments of steady seeing.");
-                ui.add(egui::Slider::new(&mut self.sigma, 0.3..=4.0).text("sharpen radius"))
-                    .on_hover_text("Unsharp-mask radius — larger softens broader structure.");
-                ui.add(egui::Slider::new(&mut self.amount, 0.0..=3.0).text("sharpen amount"))
-                    .on_hover_text("How hard to sharpen. 0 = none.");
+                // 3 · Stack & sharpen
+                ui.group(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(egui::RichText::new("3 · Stack & sharpen").strong().color(ACCENT));
+                    slider_row(ui, "keep", egui::Slider::new(&mut self.keep, 0.05..=1.0),
+                        "Fraction of the sharpest frames to stack.\nLower keeps only the steadiest moments.");
+                    slider_row(ui, "sharpen radius", egui::Slider::new(&mut self.sigma, 0.3..=4.0),
+                        "Unsharp-mask radius — larger softens broader structure.");
+                    slider_row(ui, "sharpen amount", egui::Slider::new(&mut self.amount, 0.0..=3.0),
+                        "Sharpening strength. 0 = none.");
+                });
 
-                ui.add_space(14.0);
+                ui.add_space(16.0);
 
                 // Actions
                 let can_run = self.video.is_some() && self.status != Status::Running;
                 ui.add_enabled_ui(can_run, |ui| {
                     let btn = egui::Button::new(egui::RichText::new("Stack").size(16.0).color(egui::Color32::WHITE))
-                        .fill(ACCENT)
-                        .min_size(egui::vec2(ui.available_width(), 34.0));
-                    if ui.add(btn).clicked() {
+                        .fill(ACCENT);
+                    if ui.add_sized([ui.available_width(), 40.0], btn).clicked() {
                         self.start_stack();
                     }
                 });
+                ui.add_space(6.0);
                 ui.add_enabled_ui(self.stacked.is_some(), |ui| {
-                    if ui.button("Export PNG…").clicked() {
+                    if ui.add_sized([ui.available_width(), 30.0], egui::Button::new("Export PNG…")).clicked() {
                         let img = match self.view {
                             View::Stacked => self.stacked.as_ref(),
                             View::Single => self.single.as_ref(),
@@ -320,14 +339,16 @@ impl eframe::App for App {
                     }
                 });
 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 if self.status == Status::Running {
                     ui.add(egui::ProgressBar::new(self.progress).text(self.phase.clone()).animate(true));
                 }
                 if !self.report.is_empty() {
+                    ui.add_space(4.0);
                     ui.label(egui::RichText::new(&self.report).strong());
                 }
                 if let Some(err) = &self.error {
+                    ui.add_space(4.0);
                     ui.colored_label(egui::Color32::from_rgb(0xc0, 0x30, 0x20), format!("⚠ {err}"));
                 }
             });
@@ -386,8 +407,8 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
             let mut style = (*cc.egui_ctx.style()).clone();
             style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-            style.spacing.button_padding = egui::vec2(10.0, 6.0);
-            style.spacing.slider_width = 150.0;
+            style.spacing.button_padding = egui::vec2(12.0, 7.0);
+            style.spacing.slider_width = 205.0;
             cc.egui_ctx.set_style(style);
             Ok(Box::new(App::default()))
         }),
