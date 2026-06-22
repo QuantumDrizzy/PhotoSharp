@@ -1,0 +1,17 @@
+[package]
+name = "photosharp-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PhotoSharp native (egui) GUI."
+
+[[bin]]
+name = "photosharp-gui"
+path = "src/main.rs"
+
+[dependencies]
+photosharp-core = { path = "../core" }
+eframe = "0.31"
+rfd = "0.15"
+anyhow = "1"

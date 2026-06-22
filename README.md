@@ -56,16 +56,16 @@ ratio by ~√N; a final unsharp mask restores the detail the atmosphere softened
 
 ## Status
 
-**Phases 1–2 work and are verified.** The lucky-imaging core (grade/align/stack/sharpen) plus
-video input: point it at an MP4/MOV and it streams frames through `ffmpeg`, auto-crops the
-planet, and stacks — verified end to end on a real (h264) video. A synthetic `demo` runs with
-no data at all.
+**Phases 1–3 are built (1–2 verified on real footage).** The lucky-imaging core
+(grade/align/stack/sharpen) plus video input — point it at an MP4/MOV and it streams frames
+through `ffmpeg`, auto-crops the planet, and stacks — and a native `egui` GUI on top: open a
+video, tune the sliders, stack, preview, export. A synthetic `demo` runs with no data at all.
 
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | grade · align · stack · sharpen · CLI · synthetic demo | ✅ done |
 | 2 | video decode via `ffmpeg` + per-frame planet auto-crop (`--video`) | ✅ done |
-| 3 | native `egui` GUI (load, tune, preview, export) | planned |
+| 3 | native `egui` GUI — open video, sliders, preview, export | ✅ done |
 | 4 | CUDA path · 16-bit TIFF · drizzle · sub-pixel · batch | planned |
 
 See [`docs/ADR-0001-architecture.md`](docs/ADR-0001-architecture.md) for the design and its
@@ -92,6 +92,16 @@ Or on a folder of already-exported frames (PNG/JPEG/TIFF):
 ```bash
 cargo run --release -p photosharp-cli -- stack --input ./frames --keep 0.3 --stretch --out saturn.png
 ```
+
+## The GUI
+
+```bash
+cargo run --release -p photosharp-gui
+```
+
+Open a video, adjust the crop / keep-fraction / sharpening sliders, hit **Stack** (it runs on
+a worker thread so the window stays responsive), then **Export PNG**. Video input needs
+`ffmpeg` on PATH.
 
 ## Build
 
