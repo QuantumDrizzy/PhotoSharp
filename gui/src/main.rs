@@ -6,7 +6,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window in release
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use eframe::egui;
@@ -16,9 +18,9 @@ const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x25, 0x63, 0xeb); // a ca
 const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(0xf0, 0xf2, 0xf6); // soft off-white
 
 enum Msg {
-    Progress(usize, usize),
-    Phase(&'static str),
+    Progress { stage: &'static str, done: usize, total: usize },
     Done { stacked: Box<Gray>, single: Box<Gray>, report: String },
+    Cancelled,
     Error(String),
 }
 
@@ -47,6 +49,7 @@ struct App {
     amount: f32,
     status: Status,
     rx: Option<Receiver<Msg>>,
+    cancel: Arc<AtomicBool>,
     progress: f32,
     phase: String,
     stacked: Option<Gray>,
@@ -55,6 +58,7 @@ struct App {
     tex_single: Option<egui::TextureHandle>,
     view: View,
     report: String,
+    saved: Option<String>,
     error: Option<String>,
 }
 
@@ -71,6 +75,7 @@ impl Default for App {
             amount: 1.0,
             status: Status::Idle,
             rx: None,
+            cancel: Arc::new(AtomicBool::new(false)),
             progress: 0.0,
             phase: String::new(),
             stacked: None,
@@ -79,41 +84,57 @@ impl Default for App {
             tex_single: None,
             view: View::Stacked,
             report: String::new(),
+            saved: None,
             error: None,
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_stack(
     video: PathBuf,
     roi_size: usize,
     max_frames: usize,
+    total_hint: usize,
     keep: f32,
     centroid_k: f32,
     sigma: f32,
     amount: f32,
+    cancel: &AtomicBool,
     tx: &Sender<Msg>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let p = video.to_str().ok_or_else(|| anyhow::anyhow!("video path is not valid UTF-8"))?;
     let mut frames: Vec<Gray> = Vec::new();
-    decode::decode_gray(p, max_frames, |i, frame| {
+    decode::decode_gray(p, max_frames, Some(cancel), |i, frame| {
         let (cx, cy) = roi::bright_centroid(&frame, centroid_k);
         frames.push(roi::crop_centered(&frame, cx, cy, roi_size));
-        if i % 8 == 0 {
-            let _ = tx.send(Msg::Progress(i + 1, max_frames));
+        if i % 4 == 0 {
+            // total_hint = the video's real frame count when known (capped by max_frames),
+            // so the bar reflects reality instead of always dividing by the cap.
+            let _ = tx.send(Msg::Progress { stage: "decoding", done: i + 1, total: total_hint.max(i + 1) });
         }
     })?;
-    if frames.is_empty() {
-        anyhow::bail!("decoded 0 frames — is this a video file?");
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(false);
     }
-    let _ = tx.send(Msg::Phase("aligning & stacking"));
+    let n = frames.len();
+    let _ = tx.send(Msg::Progress { stage: "decoding", done: n, total: n }); // decode complete
+    if frames.is_empty() {
+        anyhow::bail!("decoded 0 frames — is this a video, and is ffmpeg on PATH?");
+    }
+
     let params = pipeline::Params { keep_fraction: keep, unsharp_sigma: sigma, unsharp_amount: amount };
-    let (img, rep) = pipeline::process(&frames, &params);
+    let (img, rep) = pipeline::process_progress(&frames, &params, |stage, done, total| {
+        let _ = tx.send(Msg::Progress { stage, done, total });
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(false);
+    }
     let gain = if rep.stacked_noise > 0.0 { rep.ref_noise / rep.stacked_noise } else { 0.0 };
-    let report = format!("Stacked {} of {} frames  ·  {gain:.1}x less noise", rep.kept, rep.total);
+    let report = format!("Stacked {} of {} frames  ·  {gain:.1}× less noise", rep.kept, rep.total);
     let single = frames[rep.ref_index].stretched();
     let _ = tx.send(Msg::Done { stacked: Box::new(img.stretched()), single: Box::new(single), report });
-    Ok(())
+    Ok(true)
 }
 
 fn gray_to_color_image(g: &Gray) -> egui::ColorImage {
@@ -166,6 +187,7 @@ impl App {
             self.video = Some(path);
             self.status = Status::Idle;
             self.error = None;
+            self.saved = None;
             self.report.clear();
             self.stacked = None;
             self.single = None;
@@ -177,22 +199,37 @@ impl App {
     fn start_stack(&mut self) {
         let (tx, rx) = channel();
         self.rx = Some(rx);
+        self.cancel = Arc::new(AtomicBool::new(false));
         self.status = Status::Running;
         self.error = None;
+        self.saved = None;
         self.report.clear();
         self.progress = 0.0;
-        self.phase = "decoding".to_owned();
+        self.phase = "Decoding…".to_owned();
         self.stacked = None;
         self.single = None;
         self.tex_stacked = None;
         self.tex_single = None;
 
+        // The video's real frame count (capped by max_frames) makes the decode bar honest;
+        // fall back to the cap if the container does not store an exact count.
+        let total_hint = self
+            .info
+            .as_ref()
+            .map(|i| i.frames)
+            .filter(|&f| f > 0)
+            .map(|f| f.min(self.max_frames))
+            .unwrap_or(self.max_frames);
+
         let v = self.video.clone().unwrap();
+        let cancel = self.cancel.clone();
         let (roi_size, mf, keep, ck, sigma, amount) =
             (self.roi, self.max_frames, self.keep, self.centroid_k, self.sigma, self.amount);
         thread::spawn(move || {
-            if let Err(e) = run_stack(v, roi_size, mf, keep, ck, sigma, amount, &tx) {
-                let _ = tx.send(Msg::Error(e.to_string()));
+            match run_stack(v, roi_size, mf, total_hint, keep, ck, sigma, amount, &cancel, &tx) {
+                Ok(true) => {}                                 // Done already sent
+                Ok(false) => { let _ = tx.send(Msg::Cancelled); }
+                Err(e) => { let _ = tx.send(Msg::Error(e.to_string())); }
             }
         });
     }
@@ -203,12 +240,30 @@ impl App {
         if let Some(rx) = &self.rx {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
-                    Msg::Progress(d, t) => {
-                        self.progress = if t > 0 { (d as f32 / t as f32).min(1.0) } else { 0.0 };
-                        self.phase = "decoding".to_owned();
+                    Msg::Progress { stage, done: d, total: t } => {
+                        // Grading/aligning/decoding fill the bar 0→1; stacking/sharpening are the
+                        // quick finishing steps, shown full with a label.
+                        self.progress = match stage {
+                            "stacking" | "sharpening" => 1.0,
+                            _ if t > 0 => (d as f32 / t as f32).min(1.0),
+                            _ => 0.0,
+                        };
+                        self.phase = match stage {
+                            "decoding" => format!("Decoding frames…  {d} / {t}"),
+                            "grading" => format!("Grading sharpness…  {d} / {t}"),
+                            "aligning" => format!("Aligning frames…  {d} / {t}"),
+                            "stacking" => "Stacking…".to_owned(),
+                            "sharpening" => "Sharpening…".to_owned(),
+                            other => other.to_owned(),
+                        };
                     }
-                    Msg::Phase(p) => self.phase = p.to_owned(),
                     Msg::Done { stacked, single, report } => done = Some((*stacked, *single, report)),
+                    Msg::Cancelled => {
+                        self.status = Status::Idle;
+                        self.phase.clear();
+                        self.progress = 0.0;
+                        clear_rx = true;
+                    }
                     Msg::Error(e) => {
                         self.error = Some(e);
                         self.status = Status::Failed;
@@ -247,7 +302,13 @@ impl App {
             ui.add_space(4.0);
             match (&self.video, &self.info) {
                 (Some(p), Some(info)) => {
-                    ui.label(p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "✓ {}",
+                            p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                        ))
+                        .color(egui::Color32::from_rgb(0x16, 0x7a, 0x3b)),
+                    );
                     let frames = if info.frames > 0 { info.frames.to_string() } else { "?".into() };
                     ui.label(
                         egui::RichText::new(format!(
@@ -256,6 +317,21 @@ impl App {
                         ))
                         .weak()
                         .small(),
+                    );
+                }
+                (Some(p), None) => {
+                    // Video picked but ffprobe couldn't read it — still loaded, length unknown.
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "✓ {}",
+                            p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                        ))
+                        .color(egui::Color32::from_rgb(0x16, 0x7a, 0x3b)),
+                    );
+                    ui.label(
+                        egui::RichText::new("length unknown — frames counted while decoding")
+                            .weak()
+                            .small(),
                     );
                 }
                 _ => {
@@ -288,16 +364,26 @@ impl App {
 
         ui.add_space(14.0);
         card(ui, |ui| {
-            let can_run = self.video.is_some() && self.status != Status::Running;
-            ui.add_enabled_ui(can_run, |ui| {
-                let btn = egui::Button::new(egui::RichText::new("Stack").size(16.0).color(egui::Color32::WHITE))
-                    .fill(ACCENT);
+            let running = self.status == Status::Running;
+            if running {
+                // While a run is in flight, the primary action is to stop it cleanly.
+                let btn = egui::Button::new(egui::RichText::new("Cancel").size(15.0).color(egui::Color32::WHITE))
+                    .fill(egui::Color32::from_rgb(0xb0, 0x3a, 0x2e));
                 if ui.add_sized([ui.available_width(), 42.0], btn).clicked() {
-                    self.start_stack();
+                    self.cancel.store(true, Ordering::Relaxed);
+                    self.phase = "Cancelling…".to_owned();
                 }
-            });
+            } else {
+                ui.add_enabled_ui(self.video.is_some(), |ui| {
+                    let btn = egui::Button::new(egui::RichText::new("Stack").size(16.0).color(egui::Color32::WHITE))
+                        .fill(ACCENT);
+                    if ui.add_sized([ui.available_width(), 42.0], btn).clicked() {
+                        self.start_stack();
+                    }
+                });
+            }
             ui.add_space(6.0);
-            ui.add_enabled_ui(self.stacked.is_some(), |ui| {
+            ui.add_enabled_ui(self.stacked.is_some() && !running, |ui| {
                 if ui.add_sized([ui.available_width(), 30.0], egui::Button::new("Export PNG…")).clicked() {
                     let img = match self.view {
                         View::Stacked => self.stacked.as_ref(),
@@ -307,17 +393,28 @@ impl App {
                         img,
                         rfd::FileDialog::new().add_filter("png", &["png"]).set_file_name("photosharp.png").save_file(),
                     ) {
-                        let _ = image_io::save_gray(img, path);
+                        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                        match image_io::save_gray(img, path) {
+                            Ok(()) => {
+                                self.saved = Some(name);
+                                self.error = None;
+                            }
+                            Err(e) => self.error = Some(format!("couldn't save: {e}")),
+                        }
                     }
                 }
             });
-            if self.status == Status::Running {
+            if running {
                 ui.add_space(8.0);
                 ui.add(egui::ProgressBar::new(self.progress).text(self.phase.clone()).animate(true));
             }
             if !self.report.is_empty() {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(&self.report).strong());
+            }
+            if let Some(name) = &self.saved {
+                ui.add_space(4.0);
+                ui.colored_label(egui::Color32::from_rgb(0x16, 0x7a, 0x3b), format!("✓ Saved  {name}"));
             }
             if let Some(err) = &self.error {
                 ui.add_space(6.0);
@@ -378,7 +475,7 @@ impl eframe::App for App {
                             .max_size(ui.available_size()),
                     );
                 } else if self.status == Status::Running {
-                    ui.label(egui::RichText::new(format!("{}…", self.phase)).size(18.0).weak());
+                    ui.label(egui::RichText::new(self.phase.clone()).size(18.0).weak());
                 } else {
                     ui.label(
                         egui::RichText::new(

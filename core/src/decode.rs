@@ -7,6 +7,7 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
 
@@ -72,8 +73,14 @@ pub fn summary(path: &str) -> Result<Summary> {
 }
 
 /// Stream gray frames from `path`, calling `on_frame(index, frame)` for up to `max_frames`.
-/// Returns the number of frames decoded.
-pub fn decode_gray<F: FnMut(usize, Gray)>(path: &str, max_frames: usize, mut on_frame: F) -> Result<usize> {
+/// Returns the number of frames decoded. If `cancel` is set partway through, decoding stops
+/// early (cooperative cancellation for a responsive GUI) and returns the frames read so far.
+pub fn decode_gray<F: FnMut(usize, Gray)>(
+    path: &str,
+    max_frames: usize,
+    cancel: Option<&AtomicBool>,
+    mut on_frame: F,
+) -> Result<usize> {
     let info = probe(path)?;
     let (w, h) = (info.w, info.h);
 
@@ -90,6 +97,9 @@ pub fn decode_gray<F: FnMut(usize, Gray)>(path: &str, max_frames: usize, mut on_
     let mut buf = vec![0u8; w * h];
     let mut idx = 0usize;
     while idx < max_frames {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break; // cooperative cancel: stop reading, return what we have
+        }
         match stdout.read_exact(&mut buf) {
             Ok(()) => {
                 let data = buf.iter().map(|&b| b as f32 / 255.0).collect();

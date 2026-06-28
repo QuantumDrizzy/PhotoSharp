@@ -96,7 +96,7 @@ fn load_dir(dir: &PathBuf) -> Result<Vec<Gray>> {
 fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize, centroid_k: f32) -> Result<Vec<Gray>> {
     let p = path.to_str().context("video path is not valid UTF-8")?;
     let mut frames: Vec<Gray> = Vec::new();
-    let n = decode::decode_gray(p, max_frames, |_i, frame| {
+    let n = decode::decode_gray(p, max_frames, None, |_i, frame| {
         let (cx, cy) = roi::bright_centroid(&frame, centroid_k);
         frames.push(roi::crop_centered(&frame, cx, cy, roi_size));
     })?;
