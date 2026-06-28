@@ -39,15 +39,26 @@ mod tests {
     fn phase_correlation_recovers_the_alignment_shift() {
         let truth = synthetic::planet(128);
         // Move the content by (5, -3); the shift that *undoes* it is (-5, 3).
-        let shifted = align::shift_image(&truth, 5, -3);
+        let shifted = align::shift_image(&truth, 5.0, -3.0);
         let (dx, dy) = align::phase_correlate(&truth, &shifted);
         assert!(
-            (dx - (-5)).abs() <= 1 && (dy - 3).abs() <= 1,
+            (dx + 5.0).abs() <= 0.5 && (dy - 3.0).abs() <= 0.5,
             "expected alignment shift near (-5, 3), got ({dx}, {dy})"
         );
         // And applying it must reconstruct the original.
         let realigned = align::shift_image(&shifted, dx, dy);
-        assert!((realigned.at(64, 64) - truth.at(64, 64)).abs() < 1e-3);
+        assert!((realigned.at(64, 64) - truth.at(64, 64)).abs() < 5e-3);
+    }
+
+    #[test]
+    fn phase_correlation_is_sub_pixel() {
+        // A fractional shift must be recovered better than the ½-pixel error that
+        // nearest-integer registration would leave (rounding 5.4 → 5 is a 0.4 px error).
+        let truth = synthetic::planet(128);
+        let shifted = align::shift_image(&truth, 5.4, -3.0);
+        let (dx, dy) = align::phase_correlate(&truth, &shifted);
+        assert!((dx + 5.4).abs() < 0.3, "sub-pixel dx off: got {dx}, want ~-5.4");
+        assert!((dy - 3.0).abs() < 0.3, "dy off: got {dy}, want ~3.0");
     }
 
     #[test]

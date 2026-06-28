@@ -49,7 +49,7 @@ pub fn capture(truth: &Gray, n: usize, seed: u64) -> Vec<Frame> {
     for _ in 0..n {
         let sx = rng.gen_range(-6..=6);
         let sy = rng.gen_range(-6..=6);
-        let shifted = align::shift_image(truth, sx, sy);
+        let shifted = align::shift_image(truth, sx as f32, sy as f32);
 
         // Variable seeing: most frames soft, a few sharp.
         let sigma = rng.gen_range(0.4f32..3.0);

@@ -49,9 +49,11 @@ fn fft2(buf: &mut [Complex<f32>], w: usize, h: usize, planner: &mut FftPlanner<f
     }
 }
 
-/// Estimate the integer shift `(dx, dy)` to apply to `mov` via [`shift_image`] so that it
-/// aligns onto `reference` (equivalently: `reference ≈ shift_image(mov, dx, dy)`).
-pub fn phase_correlate(reference: &Gray, mov: &Gray) -> (i32, i32) {
+/// Estimate the **sub-pixel** shift `(dx, dy)` to apply to `mov` via [`shift_image`] so that it
+/// aligns onto `reference` (equivalently: `reference ≈ shift_image(mov, dx, dy)`). The integer
+/// peak of the correlation surface is refined by a parabolic fit against its neighbours, so the
+/// registration is not rounded to the nearest whole pixel — which visibly sharpens a stack.
+pub fn phase_correlate(reference: &Gray, mov: &Gray) -> (f32, f32) {
     let (w, h) = (reference.w, reference.h);
     assert_eq!(mov.w, w);
     assert_eq!(mov.h, h);
@@ -106,26 +108,55 @@ pub fn phase_correlate(reference: &Gray, mov: &Gray) -> (i32, i32) {
     }
     let py = best_i / w;
     let px = best_i % w;
-    let dx = if px > w / 2 { px as i32 - w as i32 } else { px as i32 };
-    let dy = if py > h / 2 { py as i32 - h as i32 } else { py as i32 };
-    (dx, dy)
+    let int_dx = if px > w / 2 { px as i32 - w as i32 } else { px as i32 };
+    let int_dy = if py > h / 2 { py as i32 - h as i32 } else { py as i32 };
+
+    // Parabolic sub-pixel refinement: fit a quadratic to the peak and its two neighbours along
+    // each axis (the correlation surface is periodic, so neighbours wrap around).
+    let val = |x: usize, y: usize| r[y * w + x].re;
+    let cx = val(px, py);
+    let (xm, xp) = ((px + w - 1) % w, (px + 1) % w);
+    let (ym, yp) = ((py + h - 1) % h, (py + 1) % h);
+    let sub = |vm: f32, vc: f32, vp: f32| -> f32 {
+        let denom = vm - 2.0 * vc + vp;
+        if denom.abs() > 1e-12 {
+            (0.5 * (vm - vp) / denom).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        }
+    };
+    let ddx = sub(val(xm, py), cx, val(xp, py));
+    let ddy = sub(val(px, ym), cx, val(px, yp));
+    (int_dx as f32 + ddx, int_dy as f32 + ddy)
 }
 
-/// Shift an image by integer `(dx, dy)`: positive `dx` moves content right, positive
-/// `dy` down. Vacated edges are filled with 0.
-pub fn shift_image(g: &Gray, dx: i32, dy: i32) -> Gray {
-    let mut out = Gray::new(g.w, g.h);
-    for y in 0..g.h as i32 {
-        let sy = y - dy;
-        if sy < 0 || sy >= g.h as i32 {
-            continue;
+/// Shift an image by a (possibly fractional) `(dx, dy)`: positive `dx` moves content right,
+/// positive `dy` down. Fractional shifts are resolved by bilinear interpolation (so sub-pixel
+/// registration is honoured); vacated edges are filled with 0. An integer shift reproduces the
+/// exact nearest-neighbour copy.
+pub fn shift_image(g: &Gray, dx: f32, dy: f32) -> Gray {
+    let (w, h) = (g.w as i32, g.h as i32);
+    let sample = |xx: i32, yy: i32| -> f32 {
+        if xx < 0 || yy < 0 || xx >= w || yy >= h {
+            0.0
+        } else {
+            g.at(xx as usize, yy as usize)
         }
-        for x in 0..g.w as i32 {
-            let sx = x - dx;
-            if sx < 0 || sx >= g.w as i32 {
-                continue;
-            }
-            out.set(x as usize, y as usize, g.at(sx as usize, sy as usize));
+    };
+    let mut out = Gray::new(g.w, g.h);
+    for y in 0..g.h {
+        for x in 0..g.w {
+            let sx = x as f32 - dx;
+            let sy = y as f32 - dy;
+            let x0 = sx.floor() as i32;
+            let y0 = sy.floor() as i32;
+            let fx = sx - x0 as f32;
+            let fy = sy - y0 as f32;
+            let v = sample(x0, y0) * (1.0 - fx) * (1.0 - fy)
+                + sample(x0 + 1, y0) * fx * (1.0 - fy)
+                + sample(x0, y0 + 1) * (1.0 - fx) * fy
+                + sample(x0 + 1, y0 + 1) * fx * fy;
+            out.set(x, y, v);
         }
     }
     out
