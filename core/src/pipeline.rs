@@ -5,10 +5,24 @@ use rayon::prelude::*;
 use crate::gray::Gray;
 use crate::{align, quality, sharpen, stack};
 
+/// How the kept, aligned frames are combined into one image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StackMethod {
+    /// Plain average — lowest noise, but smears per-frame outliers.
+    Mean,
+    /// Per-pixel median — robust to outliers, no threshold.
+    Median,
+    /// Sigma-clipped mean — rejects values beyond `kappa`·σ, then averages (the lucky-imaging
+    /// default). `iters` re-estimates the bounds.
+    SigmaClip { kappa: f32, iters: usize },
+}
+
 /// Tunable parameters for a stacking run.
 pub struct Params {
     /// Fraction of the sharpest frames to keep, in `(0, 1]`.
     pub keep_fraction: f32,
+    /// How to combine the kept frames.
+    pub stack_method: StackMethod,
     /// Gaussian sigma for the unsharp mask.
     pub unsharp_sigma: f32,
     /// Unsharp strength.
@@ -17,7 +31,12 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Self { keep_fraction: 0.3, unsharp_sigma: 1.5, unsharp_amount: 1.0 }
+        Self {
+            keep_fraction: 0.3,
+            stack_method: StackMethod::Mean,
+            unsharp_sigma: 1.5,
+            unsharp_amount: 1.0,
+        }
     }
 }
 
@@ -44,15 +63,26 @@ pub struct Report {
 /// Grade every frame, keep the sharpest fraction, align them onto the sharpest frame,
 /// and mean-stack. This is the noise-reducing heart of lucky imaging.
 pub fn stack_frames(frames: &[Gray], keep_fraction: f32) -> StackResult {
-    stack_frames_progress(frames, keep_fraction, |_, _, _| {})
+    stack_frames_method(frames, keep_fraction, StackMethod::Mean, |_, _, _| {})
 }
 
 /// Like [`stack_frames`], but reports progress through each stage via `on(stage, done, total)`
-/// — `stage` is one of `"grading"`, `"aligning"`, `"stacking"`. Lets a GUI show what the
-/// (otherwise silent) align loop is actually doing instead of looking frozen.
+/// — `stage` is one of `"grading"`, `"aligning"`, `"stacking"`. Mean-combines; use
+/// [`stack_frames_method`] to choose the combiner.
 pub fn stack_frames_progress<F: FnMut(&'static str, usize, usize)>(
     frames: &[Gray],
     keep_fraction: f32,
+    on: F,
+) -> StackResult {
+    stack_frames_method(frames, keep_fraction, StackMethod::Mean, on)
+}
+
+/// Grade → keep the sharpest fraction → align → combine with `method`, reporting progress via
+/// `on(stage, done, total)`. The align loop is the slow part; it runs in parallel (rayon).
+pub fn stack_frames_method<F: FnMut(&'static str, usize, usize)>(
+    frames: &[Gray],
+    keep_fraction: f32,
+    method: StackMethod,
     mut on: F,
 ) -> StackResult {
     assert!(!frames.is_empty(), "no frames to stack");
@@ -87,10 +117,14 @@ pub fn stack_frames_progress<F: FnMut(&'static str, usize, usize)>(
         .collect();
     on("aligning", keep, keep);
 
-    // 4. Stack.
+    // 4. Combine the aligned frames with the chosen method.
     on("stacking", keep, keep);
     let refs: Vec<&Gray> = aligned.iter().collect();
-    let stacked = stack::mean_stack(&refs);
+    let stacked = match method {
+        StackMethod::Mean => stack::mean_stack(&refs),
+        StackMethod::Median => stack::median_stack(&refs),
+        StackMethod::SigmaClip { kappa, iters } => stack::sigma_clip_stack(&refs, kappa, iters),
+    };
     let ref_noise = quality::background_noise(reference);
     let stacked_noise = quality::background_noise(&stacked);
     StackResult { stacked, kept: keep, ref_index, ref_noise, stacked_noise }
@@ -108,7 +142,7 @@ pub fn process_progress<F: FnMut(&'static str, usize, usize)>(
     p: &Params,
     mut on: F,
 ) -> (Gray, Report) {
-    let sr = stack_frames_progress(frames, p.keep_fraction, &mut on);
+    let sr = stack_frames_method(frames, p.keep_fraction, p.stack_method, &mut on);
     on("sharpening", 0, 1);
     let out = sharpen::unsharp(&sr.stacked, p.unsharp_sigma, p.unsharp_amount);
     on("sharpening", 1, 1);

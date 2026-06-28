@@ -45,6 +45,12 @@ enum Cmd {
         /// Unsharp-mask strength.
         #[arg(long, default_value_t = 1.0)]
         amount: f32,
+        /// Combiner: mean | median | sigma (sigma-clipped mean — rejects per-frame outliers).
+        #[arg(long, default_value = "sigma")]
+        stack: String,
+        /// Sigma-clip threshold (only used with --stack sigma).
+        #[arg(long, default_value_t = 2.5)]
+        kappa: f32,
         /// Output PNG path.
         #[arg(long, default_value = "photosharp-out.png")]
         out: PathBuf,
@@ -112,7 +118,7 @@ fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize, centroid_k: f3
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Stack { video, input, roi, max_frames, centroid_k, keep, sigma, amount, out, stretch } => {
+        Cmd::Stack { video, input, roi, max_frames, centroid_k, keep, sigma, amount, stack, kappa, out, stretch } => {
             let frames = match (video, input) {
                 (Some(v), _) => load_video(&v, roi, max_frames, centroid_k)?,
                 (None, Some(d)) => {
@@ -122,8 +128,15 @@ fn main() -> Result<()> {
                 }
                 (None, None) => bail!("give --video <file> or --input <folder>"),
             };
+            let stack_method = match stack.to_lowercase().as_str() {
+                "mean" => pipeline::StackMethod::Mean,
+                "median" => pipeline::StackMethod::Median,
+                "sigma" | "sigma-clip" | "sigmaclip" => pipeline::StackMethod::SigmaClip { kappa, iters: 2 },
+                other => bail!("unknown --stack '{other}' (use mean | median | sigma)"),
+            };
             let params = pipeline::Params {
                 keep_fraction: keep,
+                stack_method,
                 unsharp_sigma: sigma,
                 unsharp_amount: amount,
             };

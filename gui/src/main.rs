@@ -57,12 +57,21 @@ enum View {
     Single,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum StackChoice {
+    Sigma,
+    Median,
+    Mean,
+}
+
 struct App {
     video: Option<PathBuf>,
     info: Option<decode::Summary>,
     roi: usize,
     max_frames: usize,
     keep: f32,
+    stack_choice: StackChoice,
+    kappa: f32,
     centroid_k: f32,
     sigma: f32,
     amount: f32,
@@ -89,6 +98,8 @@ impl Default for App {
             roi: 512,
             max_frames: 1000,
             keep: 0.3,
+            stack_choice: StackChoice::Sigma,
+            kappa: 2.5,
             centroid_k: 1.0,
             sigma: 1.5,
             amount: 1.0,
@@ -116,6 +127,7 @@ fn run_stack(
     max_frames: usize,
     total_hint: usize,
     keep: f32,
+    method: pipeline::StackMethod,
     centroid_k: f32,
     sigma: f32,
     amount: f32,
@@ -142,7 +154,12 @@ fn run_stack(
         anyhow::bail!("decoded 0 frames — is this a video, and is ffmpeg on PATH?");
     }
 
-    let params = pipeline::Params { keep_fraction: keep, unsharp_sigma: sigma, unsharp_amount: amount };
+    let params = pipeline::Params {
+        keep_fraction: keep,
+        stack_method: method,
+        unsharp_sigma: sigma,
+        unsharp_amount: amount,
+    };
     let (img, rep) = pipeline::process_progress(&frames, &params, |stage, done, total| {
         let _ = tx.send(Msg::Progress { stage, done, total });
     });
@@ -257,12 +274,17 @@ impl App {
             .map(|f| f.min(self.max_frames))
             .unwrap_or(self.max_frames);
 
+        let method = match self.stack_choice {
+            StackChoice::Sigma => pipeline::StackMethod::SigmaClip { kappa: self.kappa, iters: 2 },
+            StackChoice::Median => pipeline::StackMethod::Median,
+            StackChoice::Mean => pipeline::StackMethod::Mean,
+        };
         let v = self.video.clone().unwrap();
         let cancel = self.cancel.clone();
         let (roi_size, mf, keep, ck, sigma, amount) =
             (self.roi, self.max_frames, self.keep, self.centroid_k, self.sigma, self.amount);
         thread::spawn(move || {
-            match run_stack(v, roi_size, mf, total_hint, keep, ck, sigma, amount, &cancel, &tx) {
+            match run_stack(v, roi_size, mf, total_hint, keep, method, ck, sigma, amount, &cancel, &tx) {
                 Ok(true) => {}                                 // Done already sent
                 Ok(false) => { let _ = tx.send(Msg::Cancelled); }
                 Err(e) => { let _ = tx.send(Msg::Error(e.to_string())); }
@@ -392,6 +414,20 @@ impl App {
             ui.label(egui::RichText::new("3 · Stack & sharpen").strong().color(ACCENT));
             slider_row(ui, "keep", egui::Slider::new(&mut self.keep, 0.05..=1.0),
                 "Fraction of the sharpest frames to stack.\nLower keeps only the steadiest moments.");
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("stack method").small().weak());
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.stack_choice, StackChoice::Sigma, "Sigma-clip")
+                    .on_hover_text("Rejects per-frame outliers (planes, satellites, hot pixels) then averages. Best default.");
+                ui.selectable_value(&mut self.stack_choice, StackChoice::Median, "Median")
+                    .on_hover_text("Per-pixel median — robust to outliers, slightly noisier.");
+                ui.selectable_value(&mut self.stack_choice, StackChoice::Mean, "Mean")
+                    .on_hover_text("Plain average — lowest noise, no outlier rejection.");
+            });
+            if self.stack_choice == StackChoice::Sigma {
+                slider_row(ui, "clip κ (σ)", egui::Slider::new(&mut self.kappa, 1.5..=4.0),
+                    "How aggressively to reject outliers. Lower = stricter. ~2.5 is a good default.");
+            }
             slider_row(ui, "sharpen radius", egui::Slider::new(&mut self.sigma, 0.3..=4.0),
                 "Unsharp-mask radius — larger softens broader structure.");
             slider_row(ui, "sharpen amount", egui::Slider::new(&mut self.amount, 0.0..=3.0),
