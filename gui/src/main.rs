@@ -16,6 +16,25 @@ use photosharp_core::{decode, image_io, pipeline, roi, Gray};
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x25, 0x63, 0xeb); // a calm blue
 const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(0xf0, 0xf2, 0xf6); // soft off-white
+const SAVE_GREEN: egui::Color32 = egui::Color32::from_rgb(0x16, 0x7a, 0x3b); // quick-save button
+const STAGE_BG: egui::Color32 = egui::Color32::from_rgb(0x0d, 0x11, 0x17); // dark image stage
+
+/// The repo-local `captures/` folder (created on demand, already gitignored) — every stacked
+/// result lands here so they pile up in one known place instead of being hunted in dialogs.
+fn captures_dir() -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from("captures");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Next free `captures/<stem>-NN.png`, so repeated saves in a session never overwrite.
+fn next_capture_path(stem: &str) -> std::path::PathBuf {
+    let dir = captures_dir();
+    (1..1000)
+        .map(|n| dir.join(format!("{stem}-{n:02}.png")))
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| dir.join(format!("{stem}.png")))
+}
 
 enum Msg {
     Progress { stage: &'static str, done: usize, total: usize },
@@ -178,6 +197,23 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 impl App {
+    /// Name stem for output files — the loaded video's name, or "photosharp".
+    fn stem(&self) -> String {
+        self.video
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "photosharp".to_owned())
+    }
+
+    /// The image currently shown (stacked result or the single reference frame).
+    fn current_image(&self) -> Option<&Gray> {
+        match self.view {
+            View::Stacked => self.stacked.as_ref(),
+            View::Single => self.single.as_ref(),
+        }
+    }
+
     fn open_video(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("video", &["mp4", "mov", "avi", "mkv", "m4v", "ser"])
@@ -250,8 +286,8 @@ impl App {
                         };
                         self.phase = match stage {
                             "decoding" => format!("Decoding frames…  {d} / {t}"),
-                            "grading" => format!("Grading sharpness…  {d} / {t}"),
-                            "aligning" => format!("Aligning frames…  {d} / {t}"),
+                            "grading" => format!("Grading {t} frames…"),
+                            "aligning" => format!("Aligning {t} frames…"),
                             "stacking" => "Stacking…".to_owned(),
                             "sharpening" => "Sharpening…".to_owned(),
                             other => other.to_owned(),
@@ -384,22 +420,46 @@ impl App {
             }
             ui.add_space(6.0);
             ui.add_enabled_ui(self.stacked.is_some() && !running, |ui| {
-                if ui.add_sized([ui.available_width(), 30.0], egui::Button::new("Export PNG…")).clicked() {
-                    let img = match self.view {
-                        View::Stacked => self.stacked.as_ref(),
-                        View::Single => self.single.as_ref(),
-                    };
-                    if let (Some(img), Some(path)) = (
-                        img,
-                        rfd::FileDialog::new().add_filter("png", &["png"]).set_file_name("photosharp.png").save_file(),
-                    ) {
+                // Quick save: one click, auto-named, straight into the repo's captures/ folder.
+                let save_btn = egui::Button::new(
+                    egui::RichText::new("⬇  Save to captures/").size(15.0).color(egui::Color32::WHITE),
+                )
+                .fill(SAVE_GREEN);
+                if ui.add_sized([ui.available_width(), 34.0], save_btn).clicked() {
+                    let path = next_capture_path(&self.stem());
+                    let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let res = self.current_image().map(|img| image_io::save_gray(img, &path));
+                    match res {
+                        Some(Ok(())) => {
+                            self.saved = Some(format!("captures/{name}"));
+                            self.error = None;
+                        }
+                        Some(Err(e)) => self.error = Some(format!("couldn't save: {e}")),
+                        None => {}
+                    }
+                }
+                ui.add_space(4.0);
+                // Export elsewhere: a dialog that still defaults into captures/ with a fresh name.
+                if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Export to…")).clicked() {
+                    let start_name = next_capture_path(&self.stem())
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let chosen = rfd::FileDialog::new()
+                        .add_filter("png", &["png"])
+                        .set_directory(captures_dir())
+                        .set_file_name(start_name)
+                        .save_file();
+                    if let Some(path) = chosen {
                         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                        match image_io::save_gray(img, path) {
-                            Ok(()) => {
+                        let res = self.current_image().map(|img| image_io::save_gray(img, &path));
+                        match res {
+                            Some(Ok(())) => {
                                 self.saved = Some(name);
                                 self.error = None;
                             }
-                            Err(e) => self.error = Some(format!("couldn't save: {e}")),
+                            Some(Err(e)) => self.error = Some(format!("couldn't save: {e}")),
+                            None => {}
                         }
                     }
                 }
@@ -453,42 +513,56 @@ impl eframe::App for App {
                 });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.tex_stacked.is_some() {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.view, View::Single, "Single frame");
-                    ui.selectable_value(&mut self.view, View::Stacked, "Stacked result");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("compare before / after").weak().small());
+        // The image stage is a dark canvas — the Moon and planets read far better on black,
+        // and it makes the tool feel like a real imaging app rather than a form.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(STAGE_BG).inner_margin(egui::Margin::same(12)))
+            .show(ctx, |ui| {
+                ui.visuals_mut().override_text_color = Some(egui::Color32::from_gray(210));
+                if self.tex_stacked.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.view, View::Single, "Single frame");
+                        ui.selectable_value(&mut self.view, View::Stacked, "Stacked result");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new("compare before / after").weak().small());
+                        });
                     });
-                });
-                ui.separator();
-            }
-            let tex = match self.view {
-                View::Stacked => self.tex_stacked.as_ref(),
-                View::Single => self.tex_single.as_ref(),
-            };
-            ui.centered_and_justified(|ui| {
+                    ui.add_space(6.0);
+                }
+                let tex = match self.view {
+                    View::Stacked => self.tex_stacked.as_ref(),
+                    View::Single => self.tex_single.as_ref(),
+                };
                 if let Some(tex) = tex {
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::new(tex.id(), tex.size_vec2()))
-                            .max_size(ui.available_size()),
-                    );
+                    ui.centered_and_justified(|ui| {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(tex.id(), tex.size_vec2()))
+                                .max_size(ui.available_size()),
+                        );
+                    });
                 } else if self.status == Status::Running {
-                    ui.label(egui::RichText::new(self.phase.clone()).size(18.0).weak());
+                    ui.centered_and_justified(|ui| {
+                        ui.label(egui::RichText::new(self.phase.clone()).size(18.0));
+                    });
                 } else {
-                    ui.label(
-                        egui::RichText::new(
-                            "Open a telescope video, then press Stack.\n\n\
-                             1 · Open video      2 · Set crop & detect for your target\n\
-                             3 · Stack           4 · Compare and Export PNG",
-                        )
-                        .size(15.0)
-                        .weak(),
-                    );
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(ui.available_height() * 0.26);
+                        ui.label(egui::RichText::new("🌙").size(54.0));
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new("Turn a shaky telescope video into one sharp frame")
+                                .size(18.0)
+                                .color(egui::Color32::from_gray(225)),
+                        );
+                        ui.add_space(16.0);
+                        ui.label(
+                            egui::RichText::new("1 · Open video     2 · Crop & detect     3 · Stack     4 · Save to captures/")
+                                .size(14.0)
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                    });
                 }
             });
-        });
     }
 }
 

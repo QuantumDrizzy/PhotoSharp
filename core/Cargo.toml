@@ -9,5 +9,6 @@ description = "Core lucky-imaging pipeline: frame grading, FFT registration, sta
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 rustfft = "6"
+rayon = "1"
 rand = "0.8"
 anyhow = "1"

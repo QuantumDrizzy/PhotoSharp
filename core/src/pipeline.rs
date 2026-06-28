@@ -1,5 +1,7 @@
 //! The lucky-imaging pipeline: grade -> select -> align -> stack -> sharpen.
 
+use rayon::prelude::*;
+
 use crate::gray::Gray;
 use crate::{align, quality, sharpen, stack};
 
@@ -56,14 +58,13 @@ pub fn stack_frames_progress<F: FnMut(&'static str, usize, usize)>(
     assert!(!frames.is_empty(), "no frames to stack");
     let n = frames.len();
 
-    // 1. Grade by sharpness, sharpest first.
-    let mut scored: Vec<(usize, f32)> = Vec::with_capacity(n);
-    for (i, f) in frames.iter().enumerate() {
-        scored.push((i, quality::laplacian_variance(f)));
-        if i % 8 == 0 {
-            on("grading", i + 1, n);
-        }
-    }
+    // 1. Grade by sharpness (parallel — each frame is independent), sharpest first.
+    on("grading", 0, n);
+    let mut scored: Vec<(usize, f32)> = frames
+        .par_iter()
+        .enumerate()
+        .map(|(i, f)| (i, quality::laplacian_variance(f)))
+        .collect();
     on("grading", n, n);
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
@@ -71,15 +72,20 @@ pub fn stack_frames_progress<F: FnMut(&'static str, usize, usize)>(
     let keep = ((n as f32 * keep_fraction).ceil() as usize).clamp(1, n);
     let best: Vec<usize> = scored.iter().take(keep).map(|s| s.0).collect();
 
-    // 3. Reference = the single sharpest frame; align every kept frame onto it (the slow part).
+    // 3. Reference = the single sharpest frame; align every kept frame onto it. This was the
+    //    slow, sequential part — each alignment is independent, so run them in parallel (rayon).
+    //    `phase_correlate` builds its own FFT planner per call, so this is thread-safe.
     let ref_index = best[0];
     let reference = &frames[ref_index];
-    let mut aligned: Vec<Gray> = Vec::with_capacity(keep);
-    for (k, &i) in best.iter().enumerate() {
-        let (dx, dy) = align::phase_correlate(reference, &frames[i]);
-        aligned.push(align::shift_image(&frames[i], dx, dy));
-        on("aligning", k + 1, keep);
-    }
+    on("aligning", 0, keep);
+    let aligned: Vec<Gray> = best
+        .par_iter()
+        .map(|&i| {
+            let (dx, dy) = align::phase_correlate(reference, &frames[i]);
+            align::shift_image(&frames[i], dx, dy)
+        })
+        .collect();
+    on("aligning", keep, keep);
 
     // 4. Stack.
     on("stacking", keep, keep);
