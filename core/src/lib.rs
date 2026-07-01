@@ -12,12 +12,14 @@ pub mod gray;
 pub mod image_io;
 pub mod pipeline;
 pub mod quality;
+pub mod rgb;
 pub mod roi;
 pub mod sharpen;
 pub mod stack;
 pub mod synthetic;
 
 pub use gray::Gray;
+pub use rgb::Rgb;
 
 #[cfg(test)]
 mod tests {
@@ -79,5 +81,34 @@ mod tests {
         );
         assert_eq!(sr.stacked.w, truth.w);
         assert_eq!(sr.stacked.h, truth.h);
+    }
+
+    #[test]
+    fn color_pipeline_reduces_noise_and_keeps_colour() {
+        let truth = synthetic::planet_color(128);
+        let frames = synthetic::capture_color(&truth, 200, 7);
+
+        // Sharpening re-adds high-frequency noise; test the *stacking* by disabling it (amount 0),
+        // parallel to the grayscale stack test.
+        let params = pipeline::Params { unsharp_amount: 0.0, ..Default::default() };
+        let (out, rep) = pipeline::process_color(&frames, &params);
+
+        // Noise (measured on luminance) drops like the grayscale path.
+        let ref_noise = background_std(&frames[rep.ref_index].luminance());
+        let out_noise = background_std(&out.luminance());
+        assert!(
+            out_noise < ref_noise * 0.5,
+            "colour stack should cut background noise: {ref_noise:.5} -> {out_noise:.5}"
+        );
+
+        // Colour survives: the warm gold disc stays warm (mean R well above mean B).
+        let mean = |g: &Gray| g.data.iter().sum::<f32>() / g.data.len() as f32;
+        assert!(
+            mean(&out.r) > mean(&out.b) * 1.3,
+            "warm colour lost after stacking: R {:.3} vs B {:.3}",
+            mean(&out.r),
+            mean(&out.b)
+        );
+        assert_eq!(out.w(), truth.w());
     }
 }

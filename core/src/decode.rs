@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
 
 use crate::gray::Gray;
+use crate::rgb::Rgb;
 
 pub struct VideoInfo {
     pub w: usize,
@@ -107,6 +108,57 @@ pub fn decode_gray<F: FnMut(usize, Gray)>(
                 idx += 1;
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // last partial / EOF
+            Err(e) => {
+                let _ = child.kill();
+                return Err(e).context("reading a frame from ffmpeg");
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(idx)
+}
+
+/// Like [`decode_gray`], but streams colour frames (ffmpeg `rgb24`, 3 bytes/pixel) so the
+/// planet keeps its colour through the pipeline. Same streaming/cancel behaviour.
+pub fn decode_rgb<F: FnMut(usize, Rgb)>(
+    path: &str,
+    max_frames: usize,
+    cancel: Option<&AtomicBool>,
+    mut on_frame: F,
+) -> Result<usize> {
+    let info = probe(path)?;
+    let (w, h) = (info.w, info.h);
+
+    let mut child = Command::new("ffmpeg")
+        .args(["-v", "error", "-noautorotate", "-i", path, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning ffmpeg")?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+
+    let n = w * h;
+    let mut buf = vec![0u8; n * 3];
+    let mut idx = 0usize;
+    while idx < max_frames {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
+        match stdout.read_exact(&mut buf) {
+            Ok(()) => {
+                let mut r = vec![0.0f32; n];
+                let mut g = vec![0.0f32; n];
+                let mut b = vec![0.0f32; n];
+                for i in 0..n {
+                    r[i] = buf[i * 3] as f32 / 255.0;
+                    g[i] = buf[i * 3 + 1] as f32 / 255.0;
+                    b[i] = buf[i * 3 + 2] as f32 / 255.0;
+                }
+                on_frame(idx, Rgb { r: Gray { w, h, data: r }, g: Gray { w, h, data: g }, b: Gray { w, h, data: b } });
+                idx += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
                 let _ = child.kill();
                 return Err(e).context("reading a frame from ffmpeg");

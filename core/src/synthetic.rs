@@ -5,6 +5,7 @@
 //! and sensor noise — most frames soft, a few sharp ("the lucky ones").
 
 use crate::gray::Gray;
+use crate::rgb::Rgb;
 use crate::{align, sharpen};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -62,6 +63,49 @@ pub fn capture(truth: &Gray, n: usize, seed: u64) -> Vec<Frame> {
             *v = (*v + n).clamp(0.0, 1.0);
         }
         out.push(Frame { img: frame, true_shift: (sx, sy) });
+    }
+    out
+}
+
+/// A colour ground-truth planet: the same disc as [`planet`], tinted warm (Saturn-ish gold —
+/// R strong, G mid, B low) so the colour pipeline can be verified end-to-end without a capture.
+pub fn planet_color(size: usize) -> Rgb {
+    let base = planet(size);
+    let n = base.data.len();
+    let (mut r, mut g, mut b) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
+    for i in 0..n {
+        let v = base.data[i];
+        r[i] = (v * 1.00).min(1.0);
+        g[i] = (v * 0.78).min(1.0);
+        b[i] = (v * 0.42).min(1.0);
+    }
+    Rgb {
+        r: Gray { w: base.w, h: base.h, data: r },
+        g: Gray { w: base.w, h: base.h, data: g },
+        b: Gray { w: base.w, h: base.h, data: b },
+    }
+}
+
+/// `n` simulated colour frames: the same jitter/blur applied to all channels + per-channel noise.
+pub fn capture_color(truth: &Rgb, n: usize, seed: u64) -> Vec<Rgb> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let sx = rng.gen_range(-6..=6) as f32;
+        let sy = rng.gen_range(-6..=6) as f32;
+        let sigma = rng.gen_range(0.4f32..3.0);
+        let noise = 0.05f32;
+
+        let mut ch = |src: &Gray| {
+            let shifted = align::shift_image(src, sx, sy);
+            let mut f = sharpen::gaussian_blur(&shifted, sigma);
+            for v in f.data.iter_mut() {
+                let nz: f32 = (rng.gen::<f32>() - 0.5) * 2.0 * noise;
+                *v = (*v + nz).clamp(0.0, 1.0);
+            }
+            f
+        };
+        out.push(Rgb { r: ch(&truth.r), g: ch(&truth.g), b: ch(&truth.b) });
     }
     out
 }

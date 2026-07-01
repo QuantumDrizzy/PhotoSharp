@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use photosharp_core::{decode, image_io, pipeline, roi, synthetic, Gray};
+use photosharp_core::{decode, image_io, pipeline, roi, synthetic, Gray, Rgb};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -57,6 +57,10 @@ enum Cmd {
         /// Min-max stretch the result for visibility.
         #[arg(long)]
         stretch: bool,
+        /// Process in colour (RGB) — keeps planetary colour (Saturn's gold, Jupiter's belts).
+        /// Grading and alignment still run on luminance; colour is carried through the stack.
+        #[arg(long)]
+        color: bool,
     },
     /// Run on synthetic frames (no real data) to verify the pipeline end to end.
     Demo {
@@ -64,6 +68,9 @@ enum Cmd {
         frames: usize,
         #[arg(long, default_value = "photosharp-demo")]
         out_prefix: String,
+        /// Colour demo (RGB) instead of grayscale.
+        #[arg(long)]
+        color: bool,
     },
     /// Write synthetic capture frames as numbered PNGs (to test the folder/video path).
     GenFrames {
@@ -116,18 +123,54 @@ fn load_video(path: &PathBuf, roi_size: usize, max_frames: usize, centroid_k: f3
     Ok(frames)
 }
 
+/// Colour version of [`load_video`]: streams RGB frames and crops the planet ROI from each,
+/// detecting the centroid on luminance so the crop is identical across channels.
+fn load_video_color(path: &PathBuf, roi_size: usize, max_frames: usize, centroid_k: f32) -> Result<Vec<Rgb>> {
+    let p = path.to_str().context("video path is not valid UTF-8")?;
+    let mut frames: Vec<Rgb> = Vec::new();
+    let n = decode::decode_rgb(p, max_frames, None, |_i, frame| {
+        let (cx, cy) = roi::bright_centroid(&frame.luminance(), centroid_k);
+        frames.push(Rgb {
+            r: roi::crop_centered(&frame.r, cx, cy, roi_size),
+            g: roi::crop_centered(&frame.g, cx, cy, roi_size),
+            b: roi::crop_centered(&frame.b, cx, cy, roi_size),
+        });
+    })?;
+    if frames.is_empty() {
+        bail!("decoded 0 frames from {}", path.display());
+    }
+    println!(
+        "[photosharp] decoded {n} colour frames from {}, cropped {}x{} around the planet",
+        path.display(), frames[0].w(), frames[0].h()
+    );
+    Ok(frames)
+}
+
+/// Colour version of `load_dir`: loads a folder of frames as RGB.
+fn load_dir_color(dir: &PathBuf) -> Result<Vec<Rgb>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()).as_deref(),
+                Some("png" | "jpg" | "jpeg" | "tif" | "tiff")
+            )
+        })
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        bail!("no image frames found in {}", dir.display());
+    }
+    let mut frames = Vec::with_capacity(paths.len());
+    for p in &paths {
+        frames.push(image_io::load_rgb(p)?);
+    }
+    Ok(frames)
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Stack { video, input, roi, max_frames, centroid_k, keep, sigma, amount, stack, kappa, out, stretch } => {
-            let frames = match (video, input) {
-                (Some(v), _) => load_video(&v, roi, max_frames, centroid_k)?,
-                (None, Some(d)) => {
-                    let f = load_dir(&d)?;
-                    println!("[photosharp] loaded {} frames from {}", f.len(), d.display());
-                    f
-                }
-                (None, None) => bail!("give --video <file> or --input <folder>"),
-            };
+        Cmd::Stack { video, input, roi, max_frames, centroid_k, keep, sigma, amount, stack, kappa, out, stretch, color } => {
             let stack_method = match stack.to_lowercase().as_str() {
                 "mean" => pipeline::StackMethod::Mean,
                 "median" => pipeline::StackMethod::Median,
@@ -140,28 +183,67 @@ fn main() -> Result<()> {
                 unsharp_sigma: sigma,
                 unsharp_amount: amount,
             };
-            let (img, rep) = pipeline::process(&frames, &params);
-            let img = if stretch { img.stretched() } else { img };
-            image_io::save_gray(&img, &out)?;
+
+            let rep = if color {
+                let frames = match (&video, &input) {
+                    (Some(v), _) => load_video_color(v, roi, max_frames, centroid_k)?,
+                    (None, Some(d)) => {
+                        let f = load_dir_color(d)?;
+                        println!("[photosharp] loaded {} colour frames from {}", f.len(), d.display());
+                        f
+                    }
+                    (None, None) => bail!("give --video <file> or --input <folder>"),
+                };
+                let (img, rep) = pipeline::process_color(&frames, &params);
+                let img = if stretch { img.stretched() } else { img };
+                image_io::save_rgb(&img, &out)?;
+                rep
+            } else {
+                let frames = match (&video, &input) {
+                    (Some(v), _) => load_video(v, roi, max_frames, centroid_k)?,
+                    (None, Some(d)) => {
+                        let f = load_dir(d)?;
+                        println!("[photosharp] loaded {} frames from {}", f.len(), d.display());
+                        f
+                    }
+                    (None, None) => bail!("give --video <file> or --input <folder>"),
+                };
+                let (img, rep) = pipeline::process(&frames, &params);
+                let img = if stretch { img.stretched() } else { img };
+                image_io::save_gray(&img, &out)?;
+                rep
+            };
+
             let gain = if rep.stacked_noise > 0.0 { rep.ref_noise / rep.stacked_noise } else { 0.0 };
             println!(
-                "[photosharp] kept {}/{} sharpest | background noise {:.4} -> {:.4} ({:.1}x cleaner) | saved {}",
-                rep.kept, rep.total, rep.ref_noise, rep.stacked_noise, gain, out.display()
+                "[photosharp] kept {}/{} sharpest{} | background noise {:.4} -> {:.4} ({:.1}x cleaner) | saved {}",
+                rep.kept, rep.total, if color { " (colour)" } else { "" },
+                rep.ref_noise, rep.stacked_noise, gain, out.display()
             );
         }
-        Cmd::Demo { frames, out_prefix } => {
-            let truth = synthetic::planet(256);
-            let caps = synthetic::capture(&truth, frames, 42);
-            let raw: Vec<Gray> = caps.into_iter().map(|c| c.img).collect();
-            let (img, rep) = pipeline::process(&raw, &pipeline::Params::default());
-
-            image_io::save_gray(&raw[rep.ref_index].stretched(), format!("{out_prefix}-single.png"))?;
-            image_io::save_gray(&img.stretched(), format!("{out_prefix}-stacked.png"))?;
-            image_io::save_gray(&truth.stretched(), format!("{out_prefix}-truth.png"))?;
+        Cmd::Demo { frames, out_prefix, color } => {
+            let rep = if color {
+                let truth = synthetic::planet_color(256);
+                let caps = synthetic::capture_color(&truth, frames, 42);
+                let (img, rep) = pipeline::process_color(&caps, &pipeline::Params::default());
+                image_io::save_rgb(&caps[rep.ref_index].stretched(), format!("{out_prefix}-single.png"))?;
+                image_io::save_rgb(&img.stretched(), format!("{out_prefix}-stacked.png"))?;
+                image_io::save_rgb(&truth.stretched(), format!("{out_prefix}-truth.png"))?;
+                rep
+            } else {
+                let truth = synthetic::planet(256);
+                let caps = synthetic::capture(&truth, frames, 42);
+                let raw: Vec<Gray> = caps.into_iter().map(|c| c.img).collect();
+                let (img, rep) = pipeline::process(&raw, &pipeline::Params::default());
+                image_io::save_gray(&raw[rep.ref_index].stretched(), format!("{out_prefix}-single.png"))?;
+                image_io::save_gray(&img.stretched(), format!("{out_prefix}-stacked.png"))?;
+                image_io::save_gray(&truth.stretched(), format!("{out_prefix}-truth.png"))?;
+                rep
+            };
             let gain = if rep.stacked_noise > 0.0 { rep.ref_noise / rep.stacked_noise } else { 0.0 };
             println!(
-                "[photosharp] demo: {} frames, kept {} sharpest | background noise {:.4} -> {:.4} ({:.1}x cleaner)",
-                rep.total, rep.kept, rep.ref_noise, rep.stacked_noise, gain
+                "[photosharp] demo{}: {} frames, kept {} sharpest | background noise {:.4} -> {:.4} ({:.1}x cleaner)",
+                if color { " (colour)" } else { "" }, rep.total, rep.kept, rep.ref_noise, rep.stacked_noise, gain
             );
             println!(
                 "[photosharp] wrote {out_prefix}-single.png, {out_prefix}-stacked.png, {out_prefix}-truth.png"

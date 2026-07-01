@@ -3,6 +3,7 @@
 use rayon::prelude::*;
 
 use crate::gray::Gray;
+use crate::rgb::Rgb;
 use crate::{align, quality, sharpen, stack};
 
 /// How the kept, aligned frames are combined into one image.
@@ -152,6 +153,85 @@ pub fn process_progress<F: FnMut(&'static str, usize, usize)>(
         ref_index: sr.ref_index,
         ref_noise: sr.ref_noise,
         stacked_noise: sr.stacked_noise,
+    };
+    (out, report)
+}
+
+/// The colour pipeline. Grading and alignment run on each frame's **luminance** (reusing the whole
+/// grayscale core); the shift found is applied to R, G and B, which are stacked per channel and
+/// sharpened per channel — so planetary colour survives instead of being discarded at decode.
+pub fn process_color(frames: &[Rgb], p: &Params) -> (Rgb, Report) {
+    process_color_progress(frames, p, |_, _, _| {})
+}
+
+/// Like [`process_color`], reporting progress via `on(stage, done, total)`.
+pub fn process_color_progress<F: FnMut(&'static str, usize, usize)>(
+    frames: &[Rgb],
+    p: &Params,
+    mut on: F,
+) -> (Rgb, Report) {
+    assert!(!frames.is_empty(), "no frames to stack");
+    let n = frames.len();
+
+    // Luminance planes drive grading + alignment; colour is carried along the same shifts.
+    on("grading", 0, n);
+    let lums: Vec<Gray> = frames.par_iter().map(|f| f.luminance()).collect();
+    let mut scored: Vec<(usize, f32)> = lums
+        .par_iter()
+        .enumerate()
+        .map(|(i, l)| (i, quality::laplacian_variance(l)))
+        .collect();
+    on("grading", n, n);
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let keep = ((n as f32 * p.keep_fraction).ceil() as usize).clamp(1, n);
+    let best: Vec<usize> = scored.iter().take(keep).map(|s| s.0).collect();
+
+    let ref_index = best[0];
+    let ref_lum = &lums[ref_index];
+
+    // Align: the luminance shift is applied identically to all three channels (no colour fringing).
+    on("aligning", 0, keep);
+    let aligned: Vec<Rgb> = best
+        .par_iter()
+        .map(|&i| {
+            let (dx, dy) = align::phase_correlate(ref_lum, &lums[i]);
+            Rgb {
+                r: align::shift_image(&frames[i].r, dx, dy),
+                g: align::shift_image(&frames[i].g, dx, dy),
+                b: align::shift_image(&frames[i].b, dx, dy),
+            }
+        })
+        .collect();
+    on("aligning", keep, keep);
+
+    // Stack each channel with the chosen method.
+    on("stacking", keep, keep);
+    let combine = |refs: Vec<&Gray>| match p.stack_method {
+        StackMethod::Mean => stack::mean_stack(&refs),
+        StackMethod::Median => stack::median_stack(&refs),
+        StackMethod::SigmaClip { kappa, iters } => stack::sigma_clip_stack(&refs, kappa, iters),
+    };
+    let sr = combine(aligned.iter().map(|x| &x.r).collect());
+    let sg = combine(aligned.iter().map(|x| &x.g).collect());
+    let sb = combine(aligned.iter().map(|x| &x.b).collect());
+
+    // Sharpen each channel with the same unsharp mask.
+    on("sharpening", 0, 1);
+    let out = Rgb {
+        r: sharpen::unsharp(&sr, p.unsharp_sigma, p.unsharp_amount),
+        g: sharpen::unsharp(&sg, p.unsharp_sigma, p.unsharp_amount),
+        b: sharpen::unsharp(&sb, p.unsharp_sigma, p.unsharp_amount),
+    };
+    on("sharpening", 1, 1);
+
+    let stacked_lum = out.luminance();
+    let report = Report {
+        total: n,
+        kept: keep,
+        ref_index,
+        ref_noise: quality::background_noise(ref_lum),
+        stacked_noise: quality::background_noise(&stacked_lum),
     };
     (out, report)
 }
