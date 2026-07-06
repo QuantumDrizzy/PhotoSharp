@@ -9,6 +9,7 @@
 *.ser
 *.fits
 /captures
+/output
 /_scratch/
 photosharp-out.png
 photosharp-demo-*.png

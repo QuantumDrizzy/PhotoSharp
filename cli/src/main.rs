@@ -3,7 +3,29 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use photosharp_core::{decode, image_io, pipeline, roi, synthetic, Gray, Rgb};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// The directory PhotoSharp writes results into: `<repo>/output`, resolved from the crate location
+/// at build time so outputs never land in the current working directory (e.g. the Desktop). Created
+/// on first use.
+fn output_dir() -> Result<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent() // <repo>/cli -> <repo>
+        .unwrap_or_else(|| Path::new("."))
+        .join("output");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Resolve an output path against [`output_dir`]: an absolute path is respected as-is, a relative
+/// one is placed inside the PhotoSharp output folder.
+fn resolve_out(p: &Path) -> Result<PathBuf> {
+    if p.is_absolute() {
+        Ok(p.to_path_buf())
+    } else {
+        Ok(output_dir()?.join(p))
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -171,6 +193,7 @@ fn load_dir_color(dir: &PathBuf) -> Result<Vec<Rgb>> {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Stack { video, input, roi, max_frames, centroid_k, keep, sigma, amount, stack, kappa, out, stretch, color } => {
+            let out = resolve_out(&out)?;
             let stack_method = match stack.to_lowercase().as_str() {
                 "mean" => pipeline::StackMethod::Mean,
                 "median" => pipeline::StackMethod::Median,
@@ -222,6 +245,7 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Demo { frames, out_prefix, color } => {
+            let out_prefix = resolve_out(Path::new(&out_prefix))?.to_string_lossy().into_owned();
             let rep = if color {
                 let truth = synthetic::planet_color(256);
                 let caps = synthetic::capture_color(&truth, frames, 42);
@@ -250,6 +274,7 @@ fn main() -> Result<()> {
             );
         }
         Cmd::GenFrames { frames, size, out_dir } => {
+            let out_dir = resolve_out(&out_dir)?;
             std::fs::create_dir_all(&out_dir)?;
             let truth = synthetic::planet(size);
             let caps = synthetic::capture(&truth, frames, 42);
